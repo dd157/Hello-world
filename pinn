@@ -1,0 +1,64 @@
+import torch
+import torch.nn as nn
+import torch.optim as optim
+
+# 1. Physics-Informed Neural Network Class
+class PINN(nn.Module):
+    def __init__(self):
+        super(PINN, self).__init__()
+        # Architecture: 2 inputs -> 3 hidden layers (32 neurons) -> 1 output (T) [cite: 258]
+        self.net = nn.Sequential(
+            nn.Linear(2, 32), nn.Tanh(),
+            nn.Linear(32, 32), nn.Tanh(),
+            nn.Linear(32, 32), nn.Tanh(),
+            nn.Linear(32, 1)
+        )
+        # Parameters to be estimated (Initialized with a guess) [cite: 92]
+        self.kx = nn.Parameter(torch.tensor([20.0], requires_grad=True)) 
+        self.ky = nn.Parameter(torch.tensor([15.0], requires_grad=True))
+
+    def forward(self, x, y):
+        return self.net(torch.cat([x, y], dim=1))
+
+# 2. PDE Residual (Equation 4) [cite: 101]
+def pde_residual(model, x, y, q=2000.0):
+    x.requires_grad_(True)
+    y.requires_grad_(True)
+    T = model(x, y)
+    
+    dT_dx = torch.autograd.grad(T, x, grad_outputs=torch.ones_like(T), create_graph=True)[0]
+    dT_dxx = torch.autograd.grad(dT_dx, x, grad_outputs=torch.ones_like(dT_dx), create_graph=True)[0]
+    
+    dT_dy = torch.autograd.grad(T, y, grad_outputs=torch.ones_like(T), create_graph=True)[0]
+    dT_dyy = torch.autograd.grad(dT_dy, y, grad_outputs=torch.ones_like(dT_dy), create_graph=True)[0]
+    
+    # kx*d2T/dx2 + ky*d2T/dy2 + q = 0 [cite: 101]
+    return model.kx * dT_dxx + model.ky * dT_dyy + q
+
+# 3. Training Loop with Scheduled Loss Weighting [cite: 98]
+model = PINN()
+optimizer = optim.Adam(model.parameters(), lr=0.001)
+scheduler_term = 0 # 'i' in the paper's algorithm [cite: 98]
+
+# Assume 'data_points' contains the 20 sparse measurements [cite: 122]
+for epoch in range(20000):
+    optimizer.zero_grad()
+    
+    # Calculate losses [cite: 67, 98]
+    loss_pde = torch.mean(pde_residual(model, x_collocation, y_collocation)**2)
+    loss_bc = torch.mean((model(x_bc, y_bc) - T_bc)**2)
+    loss_data = torch.mean((model(x_sparse, y_sparse) - T_measured)**2)
+    
+    # Weighting Schedule: Increment scheduler_term every N epochs [cite: 98]
+    if epoch % 1000 == 0:
+        scheduler_term += 1
+    
+    # Total Loss Formula from the Paper (Equation 10/Table 1) [cite: 98]
+    # (w3 + i * 10^-3) * L_data
+    w_data = 1.0 + (scheduler_term * 1e-3)
+    total_loss = loss_pde + loss_bc + (w_data * loss_data)
+    
+    total_loss.backward()
+    optimizer.step()
+
+print(f"Converged kx: {model.kx.item()}, ky: {model.ky.item()}")
